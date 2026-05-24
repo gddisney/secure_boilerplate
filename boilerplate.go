@@ -1,8 +1,7 @@
-package secure_boilerplate
+package boilerplate
 
 import (
 	"log"
-	"net/http"
 	"os"
 
 	"github.com/gddisney/guikit"
@@ -16,11 +15,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// IdentityProvider is an empty interface. This allows us to inject dynamic providers 
-// (like webauthnext) without triggering Go's strict cross-module interface compiler checks.
+// IdentityProvider is an empty interface, bypassing cross-package compiler restrictions.
 type IdentityProvider interface{}
 
-// Config defines the structure for YAML bootstrap data
 type Config struct {
 	Apps  []identity_provider.Application `yaml:"apps"`
 	Users []identity_provider.Identity    `yaml:"users"`
@@ -36,113 +33,84 @@ type Server struct {
 	Audit        *identity_provider.AuditController
 }
 
-// Start enforces the boot sequence, loading config and initializing the identity stack
+// Start enforces the strict boot sequence for the Zero-Trust Edge Node
 func Start(configPath string, provider IdentityProvider, routeRegister func(s *Server)) {
 	// 1. Load YAML Configuration
-	cfgData, err := os.ReadFile(configPath)
-	if err != nil {
-		log.Fatalf("Failed to read config file at %s: %v", configPath, err)
-	}
-	
 	var cfg Config
-	if err := yaml.Unmarshal(cfgData, &cfg); err != nil {
-		log.Fatalf("Failed to parse YAML config: %v", err)
+	if cfgData, err := os.ReadFile(configPath); err == nil {
+		if err := yaml.Unmarshal(cfgData, &cfg); err != nil {
+			log.Fatalf("Failed to parse config: %v", err)
+		}
+	} else {
+		log.Printf("[WARNING] Bootstrap config not found at %s. Skipping YAML load.", configPath)
 	}
 
-	// 2. Boot GUI Engine (Mirrors secure_logger.go)
+	// 2. Core Infrastructure
 	ui, err := guikit.New("ui.db", "ui.wal")
-	if err != nil {
-		log.Fatalf("Failed to boot guikit: %v", err)
-	}
+	if err != nil { log.Fatalf("Failed to boot guikit: %v", err) }
 
-	// 3. Safe Type Assertion for Search Engine
-	// orchid_sync explicitly requires *webauthnext.Provider. We safely assert it here.
+	// Safe Runtime Type-Assertion
 	concreteProvider, ok := provider.(*webauthnext.Provider)
-	if !ok {
-		log.Fatalf("FATAL: Provided IdentityProvider is not a *webauthnext.Provider")
-	}
+	if !ok { log.Fatalf("FATAL: Provided IdentityProvider is not a *webauthnext.Provider") }
 
-	searchEngine, err := orchid_sync.NewEngine("data.db", 443, concreteProvider)
-	if err != nil {
-		log.Fatalf("Failed to boot search engine: %v", err)
-	}
+	searchEngine, err := orchid_sync.NewEngine("iam_data.db", 443, concreteProvider)
+	if err != nil { log.Fatalf("Failed to boot search engine: %v", err) }
 
-	// 4. Network and Router Initialization
 	edgeNode := searchEngine.NetNode()
 	db := edgeNode.DB
 	r := edgeNode.Router
 
+	// 3. Mandatory Router Dependencies
 	r.GUIKit = ui
 	r.Mux.Handle("/index", ui.Mux)
 
-	// 5. Initialize Identity & Security Stack
+	// 4. Initialize Identity & Security Stack
 	bus := make(chan secure_network.SystemEvent, 10)
+	r.LocalBus = bus 
+
 	pe := secure_policy.NewPolicyEngine(db)
-
-	admin := &identity_provider.AdminController{
-		DB:           db,
-		PolicyEngine: pe,
-		LocalBus:     bus,
-	}
-
+	admin := &identity_provider.AdminController{DB: db, PolicyEngine: pe, LocalBus: bus}
 	audit := identity_provider.NewAuditController(db, searchEngine, ui)
 	scim := identity_provider.NewSCIMDaemon(db, bus)
 
 	go scim.Start()
 
-	// 6. Execute YAML Bootstrap Flow
-	for _, app := range cfg.Apps {
-		if err := admin.RegisterApp(app); err != nil {
-			log.Printf("Bootstrap error: failed to register app %s: %v", app.ID, err)
-		}
-	}
-	for _, user := range cfg.Users {
-		if err := admin.AssignUserToApp(user, user.SessionID); err != nil {
-			log.Printf("Bootstrap error: failed to assign user %s: %v", user.Subject, err)
-		}
-	}
+	// 5. Execute Bootstrap Configuration
+	for _, app := range cfg.Apps { _ = admin.RegisterApp(app) }
+	for _, user := range cfg.Users { _ = admin.AssignUserToApp(user, user.SessionID) }
 
-	// 7. Identity & Hardware Handshake (Mirrors secure_logger.go exactly)
+	// 6. Identity & Hardware Handshake
 	keyTxn := db.BeginTxn()
 	gatewayPubKey, _ := db.Read(99, keyTxn, []byte("mesh_noise_pub"))
 	db.CommitTxn(keyTxn)
 	gatewayAddress := "localhost:443"
 
 	meshNode, err := secure_network.NewMeshNode(db, gatewayPubKey)
-	if err != nil {
-		log.Fatalf("Mesh Node instantiation failed: %v", err)
-	}
+	if err != nil { log.Fatalf("Mesh Node instantiation failed: %v", err) }
 
-	// 8. Strict Auth Flow Bootstrap
-	secure_bootstrap.BootstrapAuth(r, provider, meshNode, gatewayAddress)
+	// 7. Strict Auth Flow
+	// FIX: Passing concreteProvider which has been properly type-asserted
+	secure_bootstrap.BootstrapAuth(r, concreteProvider, meshNode, gatewayAddress)
 
-	// 9. Register pure identity routes
+	// 8. Register Pure Identity Routes
 	identity_provider.RegisterRoutes(r, admin, audit, pe)
 
-	// 10. Server Definition & Protected UI Routes
-	s := &Server{
-		UI:           ui,
-		AuthProvider: provider,
-		SearchEngine: searchEngine,
-		DB:           db,
-		Router:       r,
-		Admin:        admin,
-		Audit:        audit,
-	}
+	// 9. Server Definition & Protected Default Route
+	s := &Server{UI: ui, AuthProvider: provider, SearchEngine: searchEngine, DB: db, Router: r, Admin: admin, Audit: audit}
 
-	// Wire the main portal directly in the boilerplate
 	if r.GUIKit != nil {
+		r.GUIKit.Get("/logout", secure_bootstrap.HandleLogout)
 		r.GUIKit.Get("/", secure_bootstrap.RequireAuth(r, func(c *guikit.Context) {
-			c.Data["Title"] = "Identity Portal"
+			c.Data["Title"] = "Identity Dashboard"
 			r.GUIKit.Render(c, "views/portal")
 		}))
 	}
 
-	// 11. Execute Application-Specific Logic
+	// 10. Execute Application-Specific Logic
 	routeRegister(s)
 
-	// 12. Final Execution
-	log.Println("Booting Zero-Trust Edge Node on :443")
+	// 11. Final Execution
+	log.Println("Booting Zero-Trust Identity Hub on :443")
 	if err := edgeNode.Start("443", r.TLSConfig); err != nil {
 		log.Fatalf("Edge Node crashed: %v", err)
 	}
