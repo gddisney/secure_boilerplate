@@ -43,6 +43,7 @@ func Start(configPath string, provider IdentityProvider, routeRegister func(s *S
 	if err != nil {
 		log.Fatalf("Failed to read config: %v", err)
 	}
+	
 	var cfg Config
 	if err := yaml.Unmarshal(cfgData, &cfg); err != nil {
 		log.Fatalf("Failed to parse config: %v", err)
@@ -110,10 +111,10 @@ func Start(configPath string, provider IdentityProvider, routeRegister func(s *S
 	// 7. Strict Auth Flow Bootstrap
 	secure_bootstrap.BootstrapAuth(r, provider, meshNode, gatewayAddress)
 
-	// Register identity routes
+	// Register pure identity routes (APIs, Webhooks, Admin logic)
 	identity_provider.RegisterRoutes(r, admin, audit, pe)
 
-	// 8. User Logic Registration
+	// 8. Server Definition & Protected UI Routes
 	s := &Server{
 		UI:           ui,
 		AuthProvider: provider,
@@ -123,9 +124,19 @@ func Start(configPath string, provider IdentityProvider, routeRegister func(s *S
 		Admin:        admin,
 		Audit:        audit,
 	}
+
+	// FIX: Wire the main portal directly in the boilerplate to prevent import cycles
+	if r.GUIKit != nil {
+		r.GUIKit.Get("/", secure_bootstrap.RequireAuth(r, func(c *guikit.Context) {
+			c.Data["Title"] = "Identity Portal"
+			r.GUIKit.Render(c, "views/portal")
+		}))
+	}
+
+	// 9. Execute User Logic
 	routeRegister(s)
 
-	// 9. Execution
+	// 10. Execution
 	log.Println("Booting Zero-Trust Edge Node on :443")
 	if err := edgeNode.Start("443", r.TLSConfig); err != nil {
 		log.Fatalf("Edge Node crashed: %v", err)
