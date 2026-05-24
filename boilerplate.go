@@ -73,7 +73,7 @@ func Start(configPath string, provider IdentityProvider, routeRegister func(s *S
 	concreteProvider.SessionManager = sessionManager
 	// ------------------------------
 
-	// FIX: Type-assert the dynamic provider. With IdentityProvider as interface{}, this now works.
+	// Type-assert the dynamic provider into Orchid Sync
 	searchEngine, err := orchid_sync.NewEngine("data.db", 443, concreteProvider)
 	if err != nil {
 		log.Fatalf("Failed to boot search engine: %v", err)
@@ -128,8 +128,8 @@ func Start(configPath string, provider IdentityProvider, routeRegister func(s *S
 	}
 
 	// 7. Strict Auth Flow Bootstrap
-	// FIX: secure_bootstrap is now properly imported at the top
-	secure_bootstrap.BootstrapAuth(r, provider, meshNode, gatewayAddress)
+	// FIX: Passed concreteProvider instead of the raw interface provider
+	secure_bootstrap.BootstrapAuth(r, concreteProvider, meshNode, gatewayAddress)
 
 	// Register identity routes with the SessionManager to enforce cryptographic checks
 	identity_provider.RegisterRoutes(r, admin, audit, pe, sessionManager)
