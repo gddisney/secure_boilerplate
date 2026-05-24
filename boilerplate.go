@@ -32,7 +32,8 @@ type Server struct {
 	Audit        *identity_provider.AuditController
 }
 
-func Start(configPath string, provider IdentityProvider, routeRegister func(s *Server)) {
+// Start enforces the boot sequence. UI is passed directly to prevent database locks.
+func Start(ui *guikit.GUIKit, configPath string, provider IdentityProvider, routeRegister func(s *Server)) {
 	// 1. Load Configuration
 	cfgData, err := os.ReadFile(configPath)
 	if err != nil {
@@ -43,19 +44,13 @@ func Start(configPath string, provider IdentityProvider, routeRegister func(s *S
 		log.Fatalf("Failed to parse config: %v", err)
 	}
 
-	// 2. Type Assert the Provider immediately
+	// 2. Type-Assert the Provider immediately so it compiles with downstream modules
 	concreteProvider, ok := provider.(*webauthnext.Provider)
 	if !ok {
 		log.Fatalf("FATAL: Provided IdentityProvider is not a *webauthnext.Provider")
 	}
 
-	// 3. Core Infrastructure
-	ui, err := guikit.New("ui.db", "ui.wal")
-	if err != nil {
-		log.Fatalf("Failed to boot guikit: %v", err)
-	}
-
-	// Pass the concrete provider here
+	// 3. Initialize Engine with concreteProvider
 	searchEngine, err := orchid_sync.NewEngine("data.db", 443, concreteProvider)
 	if err != nil {
 		log.Fatalf("Failed to boot search engine: %v", err)
@@ -67,8 +62,8 @@ func Start(configPath string, provider IdentityProvider, routeRegister func(s *S
 
 	// 4. Mandatory Router Dependencies
 	r.GUIKit = ui
-	// FIX: Mount to "/" so webauthnext and UI routes don't 404
-	r.Mux.Handle("/", ui.Mux) 
+	// FIX: Mounted to "/" so webauthnext and UI routes do not throw 404s
+	r.Mux.Handle("/", ui.Mux)
 
 	// 5. Initialize Identity & Security Stack
 	bus := make(chan secure_network.SystemEvent, 10)
@@ -109,10 +104,7 @@ func Start(configPath string, provider IdentityProvider, routeRegister func(s *S
 	}
 
 	// 8. Strict Auth Flow Bootstrap
-	// FIX: Pass the concrete provider here to satisfy the compiler
 	secure_bootstrap.BootstrapAuth(r, concreteProvider, meshNode, gatewayAddress)
-
-	// Register identity routes
 	identity_provider.RegisterRoutes(r, admin, audit, pe)
 
 	// 9. User Logic Registration
