@@ -1,4 +1,4 @@
-package boilerplate
+package secure_boilerplate
 
 import (
 	"log"
