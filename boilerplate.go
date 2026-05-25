@@ -2,6 +2,7 @@ package secure_boilerplate
 
 import (
 	"log"
+	"net/http"
 	"os"
 
 	"github.com/gddisney/guikit"
@@ -32,8 +33,21 @@ type Server struct {
 	Audit        *identity_provider.AuditController
 }
 
-// Start now accepts the UI instance directly to prevent nil pointer panics
-func Start(ui *guikit.GUIKit, configPath string, provider IdentityProvider, routeRegister func(s *Server)) {
+// --- Route Registration Module ---
+
+type RouteModule struct {
+	Server *Server
+}
+
+// Public registers endpoints that explicitly bypass Zero-Trust authentication
+func (rm *RouteModule) Public(pattern string, handler http.HandlerFunc) {
+	rm.Server.Router.Mux.HandleFunc(pattern, handler)
+}
+
+// ---------------------------------
+
+// Start now accepts the RouteModule callback to cleanly separate endpoint registration
+func Start(ui *guikit.GUIKit, configPath string, provider IdentityProvider, routeRegister func(routes *RouteModule)) {
 	var cfg Config
 	if cfgData, err := os.ReadFile(configPath); err == nil {
 		if err := yaml.Unmarshal(cfgData, &cfg); err != nil {
@@ -44,10 +58,14 @@ func Start(ui *guikit.GUIKit, configPath string, provider IdentityProvider, rout
 	}
 
 	concreteProvider, ok := provider.(*webauthnext.Provider)
-	if !ok { log.Fatalf("FATAL: Provided IdentityProvider is not a *webauthnext.Provider") }
+	if !ok {
+		log.Fatalf("FATAL: Provided IdentityProvider is not a *webauthnext.Provider")
+	}
 
 	searchEngine, err := orchid_sync.NewEngine("iam_data.db", 443, concreteProvider)
-	if err != nil { log.Fatalf("Failed to boot search engine: %v", err) }
+	if err != nil {
+		log.Fatalf("Failed to boot search engine: %v", err)
+	}
 
 	edgeNode := searchEngine.NetNode()
 	db := edgeNode.DB
@@ -75,7 +93,9 @@ func Start(ui *guikit.GUIKit, configPath string, provider IdentityProvider, rout
 	gatewayAddress := "localhost:443"
 
 	meshNode, err := secure_network.NewMeshNode(db, gatewayPubKey)
-	if err != nil { log.Fatalf("Mesh Node instantiation failed: %v", err) }
+	if err != nil {
+		log.Fatalf("Mesh Node instantiation failed: %v", err)
+	}
 
 	secure_bootstrap.BootstrapAuth(r, concreteProvider, meshNode, gatewayAddress)
 	
@@ -92,7 +112,9 @@ func Start(ui *guikit.GUIKit, configPath string, provider IdentityProvider, rout
 		}))
 	}
 
-	routeRegister(s)
+	// Initialize the module and execute the user's route registration
+	routeModule := &RouteModule{Server: s}
+	routeRegister(routeModule)
 
 	log.Println("Booting Zero-Trust Identity Hub on :443")
 	if err := edgeNode.Start("443", r.TLSConfig); err != nil {
