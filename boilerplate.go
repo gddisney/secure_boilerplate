@@ -32,6 +32,13 @@ type Server struct {
 	Admin        *identity_provider.AdminController
 	Audit        *identity_provider.AuditController
 }
+
+// --- Route Registration Module ---
+
+type RouteModule struct {
+	Server *Server
+}
+
 // Public registers endpoints that explicitly bypass Zero-Trust authentication
 func (rm *RouteModule) Public(pattern string, handler http.HandlerFunc) {
 	rm.Server.Router.Mux.HandleFunc(pattern, handler)
@@ -54,16 +61,6 @@ func (rm *RouteModule) Secure(pattern string, handler http.HandlerFunc) {
 		}
 		protectedHandler(c)
 	}))
-}
-// --- Route Registration Module ---
-
-type RouteModule struct {
-	Server *Server
-}
-
-// Public registers endpoints that explicitly bypass Zero-Trust authentication
-func (rm *RouteModule) Public(pattern string, handler http.HandlerFunc) {
-	rm.Server.Router.Mux.HandleFunc(pattern, handler)
 }
 
 // ---------------------------------
