@@ -169,3 +169,19 @@ func HandleLogout(w http.ResponseWriter, r *http.Request) {
 	})
 	http.Redirect(w, r, "/bootstrap", http.StatusFound)
 }
+// RequireAuthAdapter adapts the http.HandlerFunc middleware to work with guikit's route registration
+func RequireAuthAdapter(next func(c *guikit.Context)) func(c *guikit.Context) {
+	return func(c *guikit.Context) {
+		// Define a standard HandlerFunc that wraps the 'next' guikit call
+		h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next(c)
+		})
+		// Run the legacy RequireAuth middleware logic
+		RequireAuth(h)(c.W, c.R)
+	}
+}
+
+// HandleLogoutAdapter adapts the standard http.HandlerFunc to work with guikit route registration
+func HandleLogoutAdapter(c *guikit.GUIKit) {
+	HandleLogout(c.W, c.R)
+}
