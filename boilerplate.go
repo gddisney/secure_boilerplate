@@ -32,7 +32,29 @@ type Server struct {
 	Admin        *identity_provider.AdminController
 	Audit        *identity_provider.AuditController
 }
+// Public registers endpoints that explicitly bypass Zero-Trust authentication
+func (rm *RouteModule) Public(pattern string, handler http.HandlerFunc) {
+	rm.Server.Router.Mux.HandleFunc(pattern, handler)
+}
 
+// Secure registers an endpoint that enforces Zero-Trust authentication and Session State
+func (rm *RouteModule) Secure(pattern string, handler http.HandlerFunc) {
+	// 1. Wrap the standard http.HandlerFunc so it can be protected by RequireAuth
+	protectedHandler := secure_bootstrap.RequireAuth(rm.Server.Router, func(c *guikit.Context) {
+		handler(c.W, c.R)
+	})
+
+	// 2. Apply UI secure headers, construct the context, and register to the multiplexer
+	rm.Server.Router.Mux.HandleFunc(pattern, rm.Server.UI.SecureHeaders(func(w http.ResponseWriter, r *http.Request) {
+		c := &guikit.Context{
+			W:        w,
+			R:        r,
+			Data:     make(map[string]interface{}),
+			CspNonce: rm.Server.UI.GetNonce(r),
+		}
+		protectedHandler(c)
+	}))
+}
 // --- Route Registration Module ---
 
 type RouteModule struct {
