@@ -66,7 +66,7 @@ func (rm *RouteModule) Secure(pattern string, handler http.HandlerFunc) {
 // ---------------------------------
 
 // Start now accepts the RouteModule callback to cleanly separate endpoint registration
-func Start(ui *guikit.GUIKit, configPath string, provider IdentityProvider, routeRegister func(routes *RouteModule)) {
+func Start(ui *guikit.GUIKit, gatewayAddress string, configPath string, provider IdentityProvider, routeRegister func(routes *RouteModule)) {
 	var cfg Config
 	if cfgData, err := os.ReadFile(configPath); err == nil {
 		if err := yaml.Unmarshal(cfgData, &cfg); err != nil {
@@ -109,7 +109,6 @@ func Start(ui *guikit.GUIKit, configPath string, provider IdentityProvider, rout
 	keyTxn := db.BeginTxn()
 	gatewayPubKey, _ := db.Read(99, keyTxn, []byte("mesh_noise_pub"))
 	db.CommitTxn(keyTxn)
-	gatewayAddress := "localhost:443"
 
 	meshNode, err := secure_network.NewMeshNode(db, gatewayPubKey)
 	if err != nil {
