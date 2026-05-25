@@ -104,10 +104,7 @@ func Start(configPath string, provider IdentityProvider, routeRegister func(s *S
 		log.Fatalf("Mesh Node instantiation failed: %v", err)
 	}
 
-	// FIX: Package prefix removed so it references the function below natively
 	BootstrapAuth(r, provider, meshNode, gatewayAddress)
-
-	// FIX: legacySessionManager added as the 5th argument
 	identity_provider.RegisterRoutes(r, admin, audit, pe, legacySessionManager)
 
 	s := &Server{
@@ -127,34 +124,29 @@ func Start(configPath string, provider IdentityProvider, routeRegister func(s *S
 	}
 }
 
-func BootstrapAuth(router *secure_network.Router, provider IdentityProvider, node *secure_network.MeshNode, address string) {
-	// Implement connection setup tasks here
-}
+func BootstrapAuth(router *secure_network.Router, provider IdentityProvider, node *secure_network.MeshNode, address string) {}
 
+// Authentic standard HTTP middleware for routes
 func RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if sub := r.Header.Get("X-Secure-Subject"); sub != "" {
 			next.ServeHTTP(w, r)
 			return
 		}
-
 		if legacySessionManager == nil {
 			http.Redirect(w, r, "/bootstrap", http.StatusFound)
 			return
 		}
-
 		cookie, err := r.Cookie("secure_mesh_session")
 		if err != nil {
 			http.Redirect(w, r, "/bootstrap", http.StatusFound)
 			return
 		}
-
 		_, err = legacySessionManager.ValidateCookieToken(cookie.Value)
 		if err != nil {
 			http.Redirect(w, r, "/bootstrap", http.StatusFound)
 			return
 		}
-
 		next.ServeHTTP(w, r)
 	}
 }
@@ -168,20 +160,4 @@ func HandleLogout(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 	})
 	http.Redirect(w, r, "/bootstrap", http.StatusFound)
-}
-// RequireAuthAdapter adapts the http.HandlerFunc middleware to work with guikit's route registration
-func RequireAuthAdapter(next func(c *guikit.Context)) func(c *guikit.Context) {
-	return func(c *guikit.Context) {
-		// Define a standard HandlerFunc that wraps the 'next' guikit call
-		h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			next(c)
-		})
-		// Run the legacy RequireAuth middleware logic
-		RequireAuth(h)(c.W, c.R)
-	}
-}
-
-// HandleLogoutAdapter adapts the standard http.HandlerFunc to work with guikit route registration
-func HandleLogoutAdapter(c *guikit.GUIKit) {
-	HandleLogout(c.W, c.R)
 }
