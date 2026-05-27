@@ -7,6 +7,7 @@ import (
 
 	"github.com/gddisney/guikit"
 	"github.com/gddisney/identity_provider"
+	"github.com/gddisney/logger"
 	"github.com/gddisney/orchid_sync"
 	"github.com/gddisney/secure_bootstrap"
 	"github.com/gddisney/secure_network"
@@ -67,13 +68,21 @@ func Start(ui *guikit.GUIKit, configPath string, provider IdentityProvider, rout
 	bus := make(chan secure_network.SystemEvent, 10)
 	r.LocalBus = bus
 	pe := secure_policy.NewPolicyEngine(edgeNode.DB)
-	admin := &identity_provider.AdminController{DB: edgeNode.DB, PolicyEngine: pe, LocalBus: bus}
+
+	// Initialize Logger
+	rpcManager := r.Modules["mesh_rpc"].(*secure_network.RPCManager)
+	Logger, err := logger.NewRPCLogger(rpcManager, "iam_edge_node", 1000, "logs.wal")
+	if err != nil {
+		log.Fatalf("Failed to initialize logger: %v", err)
+	}
+
+	admin := &identity_provider.AdminController{DB: edgeNode.DB, PolicyEngine: pe, LocalBus: bus, Logger: Logger}
 	audit := identity_provider.NewAuditController(edgeNode.DB, searchEngine, ui)
-	scim := identity_provider.NewSCIMDaemon(edgeNode.DB, bus)
+	scim := identity_provider.NewSCIMDaemon(edgeNode.DB, bus, Logger)
 	go scim.Start()
 
-	for _, app := range cfg.Apps { _ = admin.RegisterApp(app) }
-	for _, user := range cfg.Users { _ = admin.AssignUserToApp(user, user.SessionID) }
+	for _, app := range cfg.Apps { _ = admin.RegisterApp(app, "system_bootstrap") }
+	for _, user := range cfg.Users { _ = admin.AssignUserToApp(user, user.SessionID, "system_bootstrap") }
 
 	keyTxn := edgeNode.DB.BeginTxn()
 	gatewayPubKey, _ := edgeNode.DB.Read(99, keyTxn, []byte("mesh_noise_pub"))
@@ -81,11 +90,10 @@ func Start(ui *guikit.GUIKit, configPath string, provider IdentityProvider, rout
 
 	meshNode, _ := secure_network.NewMeshNode(edgeNode.DB, gatewayPubKey)
 	secure_bootstrap.BootstrapAuth(r, concreteProvider, meshNode, "localhost:443")
-	identity_provider.RegisterRoutes(r, admin, audit, pe, concreteProvider.SessionManager)
+	identity_provider.RegisterRoutes(r, admin, audit, pe, concreteProvider.SessionManager, Logger)
 
 	s := &Server{UI: ui, AuthProvider: provider, SearchEngine: searchEngine, DB: edgeNode.DB, Router: r, Admin: admin, Audit: audit}
 
-	// Register UI routes correctly using scope-captured 'r' (router) and 'ui'
 	if ui != nil {
 		ui.Mux.HandleFunc("GET /logout", func(w http.ResponseWriter, req *http.Request) {
 			secure_bootstrap.HandleLogout(w, req)
