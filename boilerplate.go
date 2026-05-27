@@ -1,6 +1,7 @@
 package secure_boilerplate
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -46,72 +47,266 @@ func (rm *RouteModule) Secure(pattern string, handler http.HandlerFunc) {
 	protected := func(c *guikit.Context) {
 		handler(c.W, c.R)
 	}
-	rm.Server.Router.Mux.HandleFunc(pattern, rm.Server.UI.SecureHeaders(func(w http.ResponseWriter, req *http.Request) {
-		c := &guikit.Context{W: w, R: req, Data: make(map[string]interface{})}
-		secure_bootstrap.RequireAuth(rm.Server.Router, protected)(c)
-	}))
+
+	rm.Server.Router.Mux.HandleFunc(
+		pattern,
+		rm.Server.UI.SecureHeaders(func(w http.ResponseWriter, req *http.Request) {
+			c := &guikit.Context{
+				W:    w,
+				R:    req,
+				Data: make(map[string]interface{}),
+			}
+
+			secure_bootstrap.RequireAuth(
+				rm.Server.Router,
+				protected,
+			)(c)
+		}),
+	)
 }
 
-func Start(ui *guikit.GUIKit, configPath string, provider IdentityProvider, routeRegister func(routes *RouteModule)) {
+func Start(
+	ui *guikit.GUIKit,
+	configPath string,
+	provider IdentityProvider,
+	routeRegister func(routes *RouteModule),
+) {
+
 	var cfg Config
+
 	if cfgData, err := os.ReadFile(configPath); err == nil {
 		_ = yaml.Unmarshal(cfgData, &cfg)
 	}
 
 	concreteProvider := provider.(*webauthnext.Provider)
-	searchEngine, _ := orchid_sync.NewEngine("iam_data.db", 443, concreteProvider)
-	edgeNode := searchEngine.NetNode()
+
+	// --------------------------------------------------
+	// Create Edge Node
+	// --------------------------------------------------
+
+	edgeNode, err := secure_network.NewEdgeNode(
+		context.Background(),
+		"iam_data.db",
+		nil,
+		concreteProvider,
+		nil,
+	)
+	if err != nil {
+		log.Fatalf("Failed to create edge node: %v", err)
+	}
+
 	r := edgeNode.Router
 	r.GUIKit = ui
-	r.Mux.Handle("/index", ui.Mux)
+
+	if ui != nil {
+		r.Mux.Handle("/index", ui.Mux)
+	}
+
+	// --------------------------------------------------
+	// Local Event Bus
+	// --------------------------------------------------
 
 	bus := make(chan secure_network.SystemEvent, 10)
 	r.LocalBus = bus
+
+	// --------------------------------------------------
+	// Policy Engine
+	// --------------------------------------------------
+
 	pe := secure_policy.NewPolicyEngine(edgeNode.DB)
 
-	// Initialize Logger
-	rpcManager := r.Modules["mesh_rpc"].(*secure_network.RPCManager)
-	Logger, err := logger.NewRPCLogger(rpcManager, "iam_edge_node", 1000, "logs.wal")
+	// --------------------------------------------------
+	// Logger
+	// --------------------------------------------------
+
+	logPage := ultimate_db.PageID(500)
+
+	sysLogger, err := logger.NewLogDispatcher(
+		"iam_edge_node",
+		edgeNode.DB,
+		logPage,
+		1000,
+	)
 	if err != nil {
 		log.Fatalf("Failed to initialize logger: %v", err)
 	}
 
-	admin := &identity_provider.AdminController{DB: edgeNode.DB, PolicyEngine: pe, LocalBus: bus, Logger: Logger}
-	audit := identity_provider.NewAuditController(edgeNode.DB, searchEngine, ui)
-	scim := identity_provider.NewSCIMDaemon(edgeNode.DB, bus, Logger)
-	go scim.Start()
+	edgeNode.Logger = sysLogger
 
-	for _, app := range cfg.Apps { _ = admin.RegisterApp(app, "system_bootstrap") }
-	for _, user := range cfg.Users { _ = admin.AssignUserToApp(user, user.SessionID, "system_bootstrap") }
+	// --------------------------------------------------
+	// Search Engine
+	// --------------------------------------------------
 
-	keyTxn := edgeNode.DB.BeginTxn()
-	gatewayPubKey, _ := edgeNode.DB.Read(99, keyTxn, []byte("mesh_noise_pub"))
-	edgeNode.DB.CommitTxn(keyTxn)
-
-	meshNode, _ := secure_network.NewMeshNode(edgeNode.DB, gatewayPubKey)
-	secure_bootstrap.BootstrapAuth(r, concreteProvider, meshNode, "localhost:443")
-	identity_provider.RegisterRoutes(r, admin, audit, pe, concreteProvider.SessionManager, Logger)
-
-	s := &Server{UI: ui, AuthProvider: provider, SearchEngine: searchEngine, DB: edgeNode.DB, Router: r, Admin: admin, Audit: audit}
-
-	if ui != nil {
-		ui.Mux.HandleFunc("GET /logout", func(w http.ResponseWriter, req *http.Request) {
-			secure_bootstrap.HandleLogout(w, req)
-		})
-		
-		ui.Mux.HandleFunc("GET /", func(w http.ResponseWriter, req *http.Request) {
-			c := &guikit.Context{W: w, R: req, Data: make(map[string]interface{})}
-			secure_bootstrap.RequireAuth(r, func(ctx *guikit.Context) {
-				ctx.Data["Title"] = "Identity Dashboard"
-				ui.Render(ctx, "views/portal")
-			})(c)
-		})
+	searchEngine, err := orchid_sync.NewEngine(
+		edgeNode.DB,
+		edgeNode,
+		sysLogger,
+	)
+	if err != nil {
+		log.Fatalf("Failed to initialize search engine: %v", err)
 	}
 
-	routeRegister(&RouteModule{Server: s})
+	// --------------------------------------------------
+	// Identity Controllers
+	// --------------------------------------------------
+
+	admin := &identity_provider.AdminController{
+		DB:           edgeNode.DB,
+		PolicyEngine: pe,
+		LocalBus:     bus,
+		Logger:       sysLogger,
+	}
+
+	audit := identity_provider.NewAuditController(
+		searchEngine,
+		ui,
+	)
+
+	// Register audit exporter into logger pipeline
+	sysLogger.RegisterExporter(audit)
+
+	scim := identity_provider.NewSCIMDaemon(
+		edgeNode.DB,
+		bus,
+		sysLogger,
+	)
+
+	go scim.Start()
+
+	// --------------------------------------------------
+	// Bootstrap Config
+	// --------------------------------------------------
+
+	for _, app := range cfg.Apps {
+		_ = admin.RegisterApp(
+			app,
+			"system_bootstrap",
+		)
+	}
+
+	for _, user := range cfg.Users {
+		_ = admin.AssignUserToApp(
+			user,
+			user.SessionID,
+			"system_bootstrap",
+		)
+	}
+
+	// --------------------------------------------------
+	// Mesh Node Bootstrap
+	// --------------------------------------------------
+
+	keyTxn := edgeNode.DB.BeginTxn()
+
+	gatewayPubKey, _ := edgeNode.DB.Read(
+		99,
+		keyTxn,
+		[]byte("mesh_noise_pub"),
+	)
+
+	edgeNode.DB.CommitTxn(keyTxn)
+
+	meshNode, err := secure_network.NewMeshNode(
+		edgeNode.DB,
+		gatewayPubKey,
+		sysLogger,
+	)
+	if err != nil {
+		log.Fatalf("Failed to initialize mesh node: %v", err)
+	}
+
+	// --------------------------------------------------
+	// Auth Bootstrap
+	// --------------------------------------------------
+
+	secure_bootstrap.BootstrapAuth(
+		r,
+		concreteProvider,
+		meshNode,
+		"localhost:443",
+		sysLogger,
+	)
+
+	// --------------------------------------------------
+	// Identity Routes
+	// --------------------------------------------------
+
+	identity_provider.RegisterRoutes(
+		r,
+		admin,
+		audit,
+		pe,
+		concreteProvider.SessionManager,
+		sysLogger,
+		"iam_edge_node",
+	)
+
+	// --------------------------------------------------
+	// Server Object
+	// --------------------------------------------------
+
+	s := &Server{
+		UI:           ui,
+		AuthProvider: provider,
+		SearchEngine: searchEngine,
+		DB:           edgeNode.DB,
+		Router:       r,
+		Admin:        admin,
+		Audit:        audit,
+	}
+
+	// --------------------------------------------------
+	// UI Routes
+	// --------------------------------------------------
+
+	if ui != nil {
+
+		ui.Mux.HandleFunc(
+			"GET /logout",
+			func(w http.ResponseWriter, req *http.Request) {
+				secure_bootstrap.HandleLogout(w, req)
+			},
+		)
+
+		ui.Mux.HandleFunc(
+			"GET /",
+			func(w http.ResponseWriter, req *http.Request) {
+
+				c := &guikit.Context{
+					W:    w,
+					R:    req,
+					Data: make(map[string]interface{}),
+				}
+
+				secure_bootstrap.RequireAuth(
+					r,
+					func(ctx *guikit.Context) {
+						ctx.Data["Title"] = "Identity Dashboard"
+						ui.Render(ctx, "views/portal")
+					},
+				)(c)
+			},
+		)
+	}
+
+	// --------------------------------------------------
+	// User Route Registration
+	// --------------------------------------------------
+
+	routeRegister(&RouteModule{
+		Server: s,
+	})
+
+	// --------------------------------------------------
+	// Start Server
+	// --------------------------------------------------
 
 	log.Println("Booting Zero-Trust Identity Hub on :443")
-	if err := edgeNode.Start("443", r.TLSConfig); err != nil {
+
+	if err := edgeNode.Start(
+		"443",
+		r.TLSConfig,
+	); err != nil {
 		log.Fatalf("Edge Node crashed: %v", err)
 	}
 }
