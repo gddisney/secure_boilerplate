@@ -1,7 +1,6 @@
 package secure_boilerplate
 
 import (
-	"context"
 	"log"
 	"net/http"
 	"os"
@@ -34,7 +33,7 @@ type Server struct {
 	Admin        *identity_provider.AdminController
 	Audit        *identity_provider.AuditController
 	Logger       *logger.LogDispatcher
-	EdgeNode     *secure_network.EdgeNode
+	Node         *secure_network.SecureNode // Updated to SecureNode
 }
 
 type RouteModule struct {
@@ -109,31 +108,11 @@ func Start(
 	}
 
 	// --------------------------------------------------
-	// PROVIDER
+	// PROVIDER & DB
 	// --------------------------------------------------
 
-	concreteProvider :=
-		provider.(*webauthnext.Provider)
-
-	// --------------------------------------------------
-	// EDGE NODE
-	// --------------------------------------------------
-
-	edgeNode, err := secure_network.NewEdgeNode(
-		context.Background(),
-		"iam_data.db",
-		nil,
-		concreteProvider,
-		nil,
-	)
-
-	if err != nil {
-
-		log.Fatalf(
-			"Failed to initialize edge node: %v",
-			err,
-		)
-	}
+	concreteProvider := provider.(*webauthnext.Provider)
+	db := ui.DB // Use the DB initialized by GUIKit
 
 	// --------------------------------------------------
 	// LOGGER
@@ -143,45 +122,53 @@ func Start(
 
 	sysLogger, err := logger.NewLogDispatcher(
 		"iam_edge_node",
-		edgeNode.DB,
+		db,
 		logPage,
 		1000,
 	)
 
 	if err != nil {
-
-		log.Fatalf(
-			"Failed to initialize logger: %v",
-			err,
-		)
+		log.Fatalf("Failed to initialize logger: %v", err)
 	}
 
-	edgeNode.Logger = sysLogger
+	// --------------------------------------------------
+	// SECURE NODE
+	// --------------------------------------------------
+
+	// Bootstraps the Router and the MeshNode internally
+	node, err := secure_network.NewSecureNode(
+		db,
+		sysLogger,
+		"0trust.cloud",
+		"https://0trust.cloud",
+		"IAM Edge Node",
+		nil,
+	)
+
+	if err != nil {
+		log.Fatalf("Failed to initialize secure node: %v", err)
+	}
 
 	// --------------------------------------------------
 	// SEARCH ENGINE
 	// --------------------------------------------------
 
+	// Uses the active DB and the MeshNode from SecureNode
 	searchEngine, err := orchid_sync.NewEngine(
-		edgeNode.DB,
-		edgeNode,
+		db,
+		node.Mesh,
 		sysLogger,
 	)
 
 	if err != nil {
-
-		log.Fatalf(
-			"Failed to initialize OrchidSync: %v",
-			err,
-		)
+		log.Fatalf("Failed to initialize OrchidSync: %v", err)
 	}
 
 	// --------------------------------------------------
 	// ROUTER
 	// --------------------------------------------------
 
-	r := edgeNode.Router
-
+	r := node.Router
 	r.GUIKit = ui
 
 	if ui != nil {
@@ -203,16 +190,14 @@ func Start(
 	// POLICY ENGINE
 	// --------------------------------------------------
 
-	pe := secure_policy.NewPolicyEngine(
-		edgeNode.DB,
-	)
+	pe := secure_policy.NewPolicyEngine(db)
 
 	// --------------------------------------------------
 	// ADMIN CONTROLLER
 	// --------------------------------------------------
 
 	admin := &identity_provider.AdminController{
-		DB:           edgeNode.DB,
+		DB:           db,
 		PolicyEngine: pe,
 		LocalBus:     bus,
 		Logger:       sysLogger,
@@ -236,7 +221,7 @@ func Start(
 	// --------------------------------------------------
 
 	scim := identity_provider.NewSCIMDaemon(
-		edgeNode.DB,
+		db,
 		bus,
 		sysLogger,
 	)
@@ -281,45 +266,13 @@ func Start(
 	}
 
 	// --------------------------------------------------
-	// LOAD GATEWAY KEY
-	// --------------------------------------------------
-
-	keyTxn := edgeNode.DB.BeginTxn()
-
-	gatewayPubKey, _ := edgeNode.DB.Read(
-		99,
-		keyTxn,
-		[]byte("mesh_noise_pub"),
-	)
-
-	edgeNode.DB.CommitTxn(keyTxn)
-
-	// --------------------------------------------------
-	// MESH NODE
-	// --------------------------------------------------
-
-	meshNode, err := secure_network.NewMeshNode(
-		edgeNode.DB,
-		gatewayPubKey,
-		sysLogger,
-	)
-
-	if err != nil {
-
-		log.Fatalf(
-			"Failed creating mesh node: %v",
-			err,
-		)
-	}
-
-	// --------------------------------------------------
 	// AUTH BOOTSTRAP
 	// --------------------------------------------------
 
 	secure_bootstrap.BootstrapAuth(
 		r,
 		concreteProvider,
-		meshNode,
+		node.Mesh,
 		"localhost:443",
 		sysLogger,
 	)
@@ -335,7 +288,7 @@ func Start(
 		pe,
 		concreteProvider.SessionManager,
 		sysLogger,
-		"localhost:443",
+		configPath, // Uses the actual config path
 	)
 
 	// --------------------------------------------------
@@ -346,12 +299,12 @@ func Start(
 		UI:           ui,
 		AuthProvider: provider,
 		SearchEngine: searchEngine,
-		DB:           edgeNode.DB,
+		DB:           db,
 		Router:       r,
 		Admin:        admin,
 		Audit:        audit,
 		Logger:       sysLogger,
-		EdgeNode:     edgeNode,
+		Node:         node,
 	}
 
 	// --------------------------------------------------
@@ -404,35 +357,3 @@ func Start(
 					},
 				)(c)
 			},
-		)
-	}
-
-	// --------------------------------------------------
-	// CUSTOM ROUTES
-	// --------------------------------------------------
-
-	routeRegister(
-		&RouteModule{
-			Server: s,
-		},
-	)
-
-	// --------------------------------------------------
-	// START SERVER
-	// --------------------------------------------------
-
-	log.Println(
-		"Booting Zero-Trust Identity Hub on :443",
-	)
-
-	if err := edgeNode.Start(
-		"443",
-		r.TLSConfig,
-	); err != nil {
-
-		log.Fatalf(
-			"Edge Node crashed: %v",
-			err,
-		)
-	}
-}
