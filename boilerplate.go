@@ -1,6 +1,7 @@
 package secure_boilerplate
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -33,6 +34,7 @@ type Server struct {
 	Admin        *identity_provider.AdminController
 	Audit        *identity_provider.AuditController
 	Logger       *logger.LogDispatcher
+	EdgeNode     *secure_network.EdgeNode
 }
 
 type RouteModule struct {
@@ -43,6 +45,7 @@ func (rm *RouteModule) Public(
 	pattern string,
 	handler http.HandlerFunc,
 ) {
+
 	rm.Server.Router.Mux.HandleFunc(
 		pattern,
 		handler,
@@ -90,7 +93,7 @@ func Start(
 ) {
 
 	// --------------------------------------------------
-	// LOAD CONFIG
+	// CONFIG
 	// --------------------------------------------------
 
 	var cfg Config
@@ -106,30 +109,76 @@ func Start(
 	}
 
 	// --------------------------------------------------
-	// AUTH PROVIDER
+	// PROVIDER
 	// --------------------------------------------------
 
 	concreteProvider :=
 		provider.(*webauthnext.Provider)
 
 	// --------------------------------------------------
+	// EDGE NODE
+	// --------------------------------------------------
+
+	edgeNode, err := secure_network.NewEdgeNode(
+		context.Background(),
+		"iam_data.db",
+		nil,
+		concreteProvider,
+		nil,
+	)
+
+	if err != nil {
+
+		log.Fatalf(
+			"Failed to initialize edge node: %v",
+			err,
+		)
+	}
+
+	// --------------------------------------------------
+	// LOGGER
+	// --------------------------------------------------
+
+	logPage := ultimate_db.PageID(200)
+
+	sysLogger, err := logger.NewLogDispatcher(
+		"iam_edge_node",
+		edgeNode.DB,
+		logPage,
+		1000,
+	)
+
+	if err != nil {
+
+		log.Fatalf(
+			"Failed to initialize logger: %v",
+			err,
+		)
+	}
+
+	edgeNode.Logger = sysLogger
+
+	// --------------------------------------------------
 	// SEARCH ENGINE
 	// --------------------------------------------------
 
 	searchEngine, err := orchid_sync.NewEngine(
-		"iam_data.db",
-		443,
-		concreteProvider,
+		edgeNode.DB,
+		edgeNode,
+		sysLogger,
 	)
 
 	if err != nil {
+
 		log.Fatalf(
 			"Failed to initialize OrchidSync: %v",
 			err,
 		)
 	}
 
-	edgeNode := searchEngine.NetNode()
+	// --------------------------------------------------
+	// ROUTER
+	// --------------------------------------------------
 
 	r := edgeNode.Router
 
@@ -140,7 +189,7 @@ func Start(
 	}
 
 	// --------------------------------------------------
-	// LOCAL EVENT BUS
+	// LOCAL BUS
 	// --------------------------------------------------
 
 	bus := make(
@@ -159,35 +208,6 @@ func Start(
 	)
 
 	// --------------------------------------------------
-	// LOGGER
-	// --------------------------------------------------
-
-	rpcMod, ok := r.Modules["mesh_rpc"]
-
-	if !ok {
-		log.Fatal(
-			"mesh_rpc module not found",
-		)
-	}
-
-	rpcManager :=
-		rpcMod.(*secure_network.RPCManager)
-
-	sysLogger, err := logger.NewRPCLogger(
-		rpcManager,
-		"iam_edge_node",
-		1000,
-		"logs.wal",
-	)
-
-	if err != nil {
-		log.Fatalf(
-			"Failed to initialize logger: %v",
-			err,
-		)
-	}
-
-	// --------------------------------------------------
 	// ADMIN CONTROLLER
 	// --------------------------------------------------
 
@@ -202,18 +222,17 @@ func Start(
 	// AUDIT CONTROLLER
 	// --------------------------------------------------
 
-	audit :=
-		identity_provider.NewAuditController(
-			searchEngine,
-			ui,
-		)
+	audit := identity_provider.NewAuditController(
+		searchEngine,
+		ui,
+	)
 
-	// IMPORTANT FIX:
-	// CONNECT LOGGER -> AUDIT EXPORTER
+	// IMPORTANT:
+	// Connect logger -> audit exporter
 	sysLogger.RegisterExporter(audit)
 
 	// --------------------------------------------------
-	// SCIM DAEMON
+	// SCIM
 	// --------------------------------------------------
 
 	scim := identity_provider.NewSCIMDaemon(
@@ -225,7 +244,7 @@ func Start(
 	go scim.Start()
 
 	// --------------------------------------------------
-	// BOOTSTRAP CONFIG APPS
+	// BOOTSTRAP APPS
 	// --------------------------------------------------
 
 	for _, app := range cfg.Apps {
@@ -262,7 +281,7 @@ func Start(
 	}
 
 	// --------------------------------------------------
-	// MESH NODE
+	// LOAD GATEWAY KEY
 	// --------------------------------------------------
 
 	keyTxn := edgeNode.DB.BeginTxn()
@@ -275,6 +294,10 @@ func Start(
 
 	edgeNode.DB.CommitTxn(keyTxn)
 
+	// --------------------------------------------------
+	// MESH NODE
+	// --------------------------------------------------
+
 	meshNode, err := secure_network.NewMeshNode(
 		edgeNode.DB,
 		gatewayPubKey,
@@ -284,13 +307,13 @@ func Start(
 	if err != nil {
 
 		log.Fatalf(
-			"Failed to create mesh node: %v",
+			"Failed creating mesh node: %v",
 			err,
 		)
 	}
 
 	// --------------------------------------------------
-	// BOOTSTRAP AUTH
+	// AUTH BOOTSTRAP
 	// --------------------------------------------------
 
 	secure_bootstrap.BootstrapAuth(
@@ -302,7 +325,7 @@ func Start(
 	)
 
 	// --------------------------------------------------
-	// REGISTER ROUTES
+	// ROUTE REGISTRATION
 	// --------------------------------------------------
 
 	identity_provider.RegisterRoutes(
@@ -328,6 +351,7 @@ func Start(
 		Admin:        admin,
 		Audit:        audit,
 		Logger:       sysLogger,
+		EdgeNode:     edgeNode,
 	}
 
 	// --------------------------------------------------
@@ -384,7 +408,7 @@ func Start(
 	}
 
 	// --------------------------------------------------
-	// USER ROUTES
+	// CUSTOM ROUTES
 	// --------------------------------------------------
 
 	routeRegister(
@@ -394,7 +418,7 @@ func Start(
 	)
 
 	// --------------------------------------------------
-	// START NODE
+	// START SERVER
 	// --------------------------------------------------
 
 	log.Println(
